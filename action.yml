@@ -1,0 +1,141 @@
+name: "catalog-doctor"
+description: "Health check for pnpm workspaces — catch dependency drift, phantom imports and broken catalog entries in CI."
+author: "Rajan Aggarwal"
+
+branding:
+  icon: "activity"
+  color: "orange"
+
+inputs:
+  version:
+    description: "Version of catalog-doctor to run, as an npm dist-tag or exact version."
+    required: false
+    default: "latest"
+  working-directory:
+    description: "Directory to run in. The workspace root is found by walking up from here."
+    required: false
+    default: "."
+  strict:
+    description: "Fail on warnings as well as errors."
+    required: false
+    default: "false"
+  only:
+    description: "Run only these rules (comma-separated rule ids)."
+    required: false
+    default: ""
+  ignore:
+    description: "Skip these rules (comma-separated rule ids)."
+    required: false
+    default: ""
+  exclude:
+    description: "Globs to keep out of source scanning (comma-separated), e.g. test/fixtures/**"
+    required: false
+    default: ""
+  fix:
+    description: >-
+      Apply every fix that does not need a human decision, then report what is left.
+      The runner's checkout is modified; committing it is your workflow's business.
+    required: false
+    default: "false"
+  fail-on-findings:
+    description: "Fail the step when findings remain. Set false to report without blocking."
+    required: false
+    default: "true"
+
+outputs:
+  total:
+    description: "Total number of findings."
+    value: ${{ steps.run.outputs.total }}
+  errors:
+    description: "Findings at error severity."
+    value: ${{ steps.run.outputs.errors }}
+  warnings:
+    description: "Findings at warn severity."
+    value: ${{ steps.run.outputs.warnings }}
+  fixable:
+    description: "Findings that --fix could resolve."
+    value: ${{ steps.run.outputs.fixable }}
+  report:
+    description: "Path to the JSON report on the runner."
+    value: ${{ steps.run.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CD_VERSION: ${{ inputs.version }}
+        CD_STRICT: ${{ inputs.strict }}
+        CD_ONLY: ${{ inputs.only }}
+        CD_IGNORE: ${{ inputs.ignore }}
+        CD_EXCLUDE: ${{ inputs.exclude }}
+        CD_FIX: ${{ inputs.fix }}
+        CD_FAIL: ${{ inputs.fail-on-findings }}
+      run: |
+        # No `set -e`: the conditional flag-building below relies on a false
+        # test not ending the step. No `set -u`: an empty args array trips it.
+        set -o pipefail
+
+        args=()
+        [ "$CD_STRICT" = "true" ] && args+=(--strict)
+        [ "$CD_FIX" = "true" ] && args+=(--fix)
+        [ -n "$CD_ONLY" ] && args+=(--only "$CD_ONLY")
+        [ -n "$CD_IGNORE" ] && args+=(--ignore "$CD_IGNORE")
+        [ -n "$CD_EXCLUDE" ] && args+=(--exclude "$CD_EXCLUDE")
+
+        pkg="catalog-doctor@${CD_VERSION}"
+        report="${RUNNER_TEMP}/catalog-doctor.json"
+
+        # Human-readable output goes to the log; the JSON run feeds the outputs
+        # and the step summary. --fix only runs on the first pass so the second
+        # reports what is genuinely left.
+        echo "::group::catalog-doctor"
+        npx --yes "$pkg" "${args[@]}"
+        status=$?
+        echo "::endgroup::"
+
+        read_args=()
+        [ -n "$CD_ONLY" ] && read_args+=(--only "$CD_ONLY")
+        [ -n "$CD_IGNORE" ] && read_args+=(--ignore "$CD_IGNORE")
+        [ -n "$CD_EXCLUDE" ] && read_args+=(--exclude "$CD_EXCLUDE")
+        npx --yes "$pkg" "${read_args[@]}" --json > "$report" 2>/dev/null || true
+
+        if [ ! -s "$report" ]; then
+          echo "::error::catalog-doctor produced no report. Check the log above."
+          exit "${status:-2}"
+        fi
+
+        node -e '
+          const fs = require("fs");
+          const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+          const s = r.summary;
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `total=${s.total}\nerrors=${s.errors}\nwarnings=${s.warnings}\nfixable=${s.fixable}\nreport=${process.argv[1]}\n`);
+
+          const lines = [];
+          lines.push("## catalog-doctor");
+          lines.push("");
+          if (s.total === 0) {
+            lines.push(`No problems found across ${r.packages} package(s).`);
+          } else {
+            lines.push(`**${s.total} finding(s)** — ${s.errors} error(s), ${s.warnings} warning(s), ${s.fixable} fixable.`);
+            lines.push("");
+            lines.push("| | Rule | Dependency | Problem |");
+            lines.push("| --- | --- | --- | --- |");
+            for (const f of r.findings.slice(0, 30)) {
+              const icon = f.severity === "error" ? "🔴" : "🟡";
+              const msg = String(f.message).replace(/\|/g, "\\|");
+              lines.push(`| ${icon} | \`${f.rule}\` | \`${f.dep ?? "—"}\` | ${msg} |`);
+            }
+            if (r.findings.length > 30) lines.push(`| | | | …and ${r.findings.length - 30} more |`);
+          }
+          const summary = process.env.GITHUB_STEP_SUMMARY;
+          if (summary) fs.appendFileSync(summary, lines.join("\n") + "\n");
+        ' "$report"
+
+        if [ "$CD_FAIL" != "true" ]; then
+          exit 0
+        fi
+        exit "${status:-0}"

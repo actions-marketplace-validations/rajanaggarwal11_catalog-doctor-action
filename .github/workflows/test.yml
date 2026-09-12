@@ -1,0 +1,62 @@
+name: Test
+
+# NOTE: switch this to `push`/`pull_request` once catalog-doctor is published to
+# npm. Until then the action has nothing to fetch and the run would fail for a
+# reason that has nothing to do with this repository.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  finds-problems:
+    name: reports a broken workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - id: doctor
+        uses: ./
+        with:
+          working-directory: test/fixture
+          fail-on-findings: false
+      - name: the fixture has known problems, so it must report them
+        shell: bash
+        run: |
+          echo "total=${{ steps.doctor.outputs.total }} errors=${{ steps.doctor.outputs.errors }}"
+          [ "${{ steps.doctor.outputs.total }}" -ge 2 ] || { echo "expected findings, got none"; exit 1; }
+          [ "${{ steps.doctor.outputs.errors }}" -ge 1 ] || { echo "expected an error-severity finding"; exit 1; }
+
+  fails-the-build:
+    name: fails when findings remain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - id: doctor
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: test/fixture
+      - name: the default must block on an error-severity finding
+        shell: bash
+        run: |
+          [ "${{ steps.doctor.outcome }}" = "failure" ] || {
+            echo "expected the step to fail, got ${{ steps.doctor.outcome }}"; exit 1; }
+
+  scoping-works:
+    name: --only narrows the run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - id: doctor
+        uses: ./
+        with:
+          working-directory: test/fixture
+          only: version-mismatch
+          fail-on-findings: false
+      - shell: bash
+        run: |
+          [ "${{ steps.doctor.outputs.total }}" = "1" ] || {
+            echo "expected exactly the lodash mismatch, got ${{ steps.doctor.outputs.total }}"; exit 1; }
