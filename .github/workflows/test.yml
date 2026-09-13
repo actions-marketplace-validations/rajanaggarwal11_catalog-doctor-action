@@ -1,10 +1,12 @@
 name: Test
 
-# NOTE: switch this to `push`/`pull_request` once catalog-doctor is published to
-# npm. Until then the action has nothing to fetch and the run would fail for a
-# reason that has nothing to do with this repository.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+  # Weekly, because the action fetches catalog-doctor@latest: a regression in
+  # a new release of the package should show up here before a user hits it.
   schedule:
     - cron: "0 7 * * 1"
 
