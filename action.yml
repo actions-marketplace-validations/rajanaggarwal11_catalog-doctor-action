@@ -74,9 +74,13 @@ runs:
         CD_FIX: ${{ inputs.fix }}
         CD_FAIL: ${{ inputs.fail-on-findings }}
       run: |
-        # No `set -e`: the conditional flag-building below relies on a false
-        # test not ending the step. No `set -u`: an empty args array trips it.
-        set -o pipefail
+        # GitHub runs a composite `shell: bash` step as `bash -e -o pipefail`
+        # whether or not the script asks for it. Under -e, the moment the CLI
+        # exits 1 with findings the step dies here — before the exit code is
+        # captured, before the JSON pass, before any output is written — and the
+        # caller sees empty outputs and a failed step even with
+        # fail-on-findings: false. So the exit code is captured on the same
+        # line, which -e leaves alone.
 
         args=()
         [ "$CD_STRICT" = "true" ] && args+=(--strict)
@@ -92,8 +96,8 @@ runs:
         # and the step summary. --fix only runs on the first pass so the second
         # reports what is genuinely left.
         echo "::group::catalog-doctor"
-        npx --yes "$pkg" "${args[@]}"
-        status=$?
+        status=0
+        npx --yes "$pkg" "${args[@]}" || status=$?
         echo "::endgroup::"
 
         read_args=()
